@@ -26,7 +26,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 
 # -----------------------------------------------------------------------------
-# Global state (store user IDs and ISO-formatted datetimes when saving)
+# Global state
 # -----------------------------------------------------------------------------
 signups = []             # List of discord.Member objects (active players)
 reserves = []            # List of discord.Member objects (reserve players)
@@ -34,8 +34,8 @@ available_times = {}     # Mapping: user_id (int) -> ready datetime (datetime ob
 game_choices = {}        # Mapping: user_id (int) -> chosen game (string)
 
 STATE_FILE = "state.json"
-signup_message = None    # Global signup message in the signup channel
-ready_notification_sent = False  # Flag to avoid duplicate notifications
+signup_message = None    # Global embed message in the signup channel
+ready_notification_sent = False  # For duplicate notification control
 
 # -----------------------------------------------------------------------------
 # State persistence functions
@@ -71,7 +71,7 @@ async def load_state(guild: discord.Guild):
     available_times.update(avail_times)
     
     game_choices = state.get("game_choices", {})
-    
+
     new_signups = []
     for uid in signups_ids:
         member = guild.get_member(uid)
@@ -103,7 +103,7 @@ async def load_state(guild: discord.Guild):
     print("State loaded.")
 
 # -----------------------------------------------------------------------------
-# Helper: Format New Zealand time (displays NZDT or NZST)
+# Helper: Format New Zealand time (without extra color)
 # -----------------------------------------------------------------------------
 def format_nz_time(dt: datetime.datetime) -> str:
     offset = dt.utcoffset()
@@ -132,13 +132,15 @@ def create_embed() -> discord.Embed:
     if signups:
         active_list = "\n".join(
             f"{i+1}. {member.mention}" +
-            (f" (Ready: {('🟢 ' if now_nzt >= available_times[member.id] else '🟠 ') + format_nz_time(available_times[member.id])})"
+            (f" (Ready: {format_nz_time(available_times[member.id])})"
              if member.id in available_times else "")
             for i, member in enumerate(signups)
         )
     else:
         active_list = "None"
-    reserve_list = "\n".join(f"{i+1}. {member.mention}" for i, member in enumerate(reserves)) if reserves else "None"
+    reserve_list = "\n".join(
+        f"{i+1}. {member.mention}" for i, member in enumerate(reserves)
+    ) if reserves else "None"
     
     embed.add_field(name="Active Players", value=active_list, inline=False)
     embed.add_field(name="Reserves", value=reserve_list, inline=False)
@@ -183,7 +185,7 @@ class UserControlView(discord.ui.View):
     def __init__(self, user: discord.Member):
         super().__init__(timeout=0)
         self.user = user
-        # Since clicking "I'm in!" immediately signs the user up, show controls for signed-up users.
+        # Show controls for a signed-up user:
         self.add_item(ToggleOutButton())
         self.add_item(SetTimeButton())
         self.add_item(LastGameButton())
@@ -208,6 +210,7 @@ class ToggleOutButton(discord.ui.Button):
                 promoted = reserves.pop(0)
                 signups.append(promoted)
         await update_embed_message()
+        # Update ephemeral message to confirm removal.
         await interaction.response.edit_message(content="You've been removed.", view=None)
 
 class SetTimeButton(discord.ui.Button):
@@ -237,7 +240,7 @@ class LastGameButton(discord.ui.Button):
         await interaction.response.edit_message(content="You've been removed.", view=None)
 
 # -----------------------------------------------------------------------------
-# New: SelectGamesButton and GameSelectView
+# New: SelectGamesButton and GameSelectView for game selection.
 # -----------------------------------------------------------------------------
 class SelectGamesButton(discord.ui.Button):
     def __init__(self):
@@ -266,9 +269,8 @@ class GameSelectView(discord.ui.View):
         choice = select.values[0]
         game_choices[interaction.user.id] = choice
         await interaction.response.edit_message(content=f"Your game choice has been set to **{choice}**.", view=None)
-        # Optionally update the embed or state if desired.
 
-# Initialize the global game_choices dictionary
+# Initialize global game_choices dictionary
 game_choices = {}
 
 # -----------------------------------------------------------------------------
