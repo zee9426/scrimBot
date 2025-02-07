@@ -31,13 +31,11 @@ bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 signups = []             # List of discord.Member objects (active players)
 reserves = []            # List of discord.Member objects (reserve players)
 available_times = {}     # Mapping: user_id (int) -> ready datetime (datetime object)
+game_choices = {}        # Mapping: user_id (int) -> chosen game (string)
 
 STATE_FILE = "state.json"
 signup_message = None    # Global signup message in the signup channel
 ready_notification_sent = False  # Flag to avoid duplicate notifications
-
-# (In this version, user controls are sent as ephemeral responses, so they don’t persist in the channel.)
-# We therefore no longer track persistent control messages.
 
 # -----------------------------------------------------------------------------
 # State persistence functions
@@ -46,14 +44,15 @@ def save_state():
     state = {
         "signups": [member.id for member in signups],
         "reserves": [member.id for member in reserves],
-        "available_times": {str(uid): dt.isoformat() for uid, dt in available_times.items()}
+        "available_times": {str(uid): dt.isoformat() for uid, dt in available_times.items()},
+        "game_choices": game_choices
     }
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
     print("State saved.")
 
 async def load_state(guild: discord.Guild):
-    global signups, reserves, available_times
+    global signups, reserves, available_times, game_choices
     if not os.path.exists(STATE_FILE):
         print("No saved state found.")
         return
@@ -70,6 +69,8 @@ async def load_state(guild: discord.Guild):
             print(f"Error parsing time for user {uid}: {e}")
     available_times.clear()
     available_times.update(avail_times)
+    
+    game_choices = state.get("game_choices", {})
     
     new_signups = []
     for uid in signups_ids:
@@ -125,13 +126,13 @@ def create_embed() -> discord.Embed:
     now_nzt = datetime.datetime.now(ZoneInfo("Pacific/Auckland"))
     embed = discord.Embed(
         title="Custom Game Sign‐Up",
-        description="Click **I'm in!** to sign up and manage your ready time.",
+        description="Click **I'm in!** to sign up, manage your ready time, and select a game.",
         color=0x00ff00
     )
     if signups:
         active_list = "\n".join(
             f"{i+1}. {member.mention}" +
-            (f" (Ready: {'Ready now' if now_nzt >= available_times[member.id] else format_nz_time(available_times[member.id])})"
+            (f" (Ready: {('🟢 ' if now_nzt >= available_times[member.id] else '🟠 ') + format_nz_time(available_times[member.id])})"
              if member.id in available_times else "")
             for i, member in enumerate(signups)
         )
@@ -141,7 +142,7 @@ def create_embed() -> discord.Embed:
     
     embed.add_field(name="Active Players", value=active_list, inline=False)
     embed.add_field(name="Reserves", value=reserve_list, inline=False)
-    embed.set_footer(text=f"Maximum active players: {MAX_ACTIVE_PLAYERS}. Reserve players are promoted as spots open up.")
+    embed.set_footer(text=f"Max active players: {MAX_ACTIVE_PLAYERS}. Reserve players are promoted as spots open up.")
     return embed
 
 async def update_embed_message():
@@ -165,7 +166,6 @@ class GlobalControlsView(discord.ui.View):
     async def im_in_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         global signups, reserves
         user = interaction.user
-        # If the user isn't signed up already, sign them up.
         if user not in signups and user not in reserves:
             if len(signups) < MAX_ACTIVE_PLAYERS:
                 signups.append(user)
@@ -183,11 +183,11 @@ class UserControlView(discord.ui.View):
     def __init__(self, user: discord.Member):
         super().__init__(timeout=0)
         self.user = user
-        # Since clicking "I'm in!" now immediately signs the user up,
-        # we only show controls for a signed‑up user.
+        # Since clicking "I'm in!" immediately signs the user up, show controls for signed-up users.
         self.add_item(ToggleOutButton())
         self.add_item(SetTimeButton())
         self.add_item(LastGameButton())
+        self.add_item(SelectGamesButton())
         if any(role.name == ADMIN_ROLE for role in user.roles):
             self.add_item(AdminControlsButton())
 
@@ -208,7 +208,6 @@ class ToggleOutButton(discord.ui.Button):
                 promoted = reserves.pop(0)
                 signups.append(promoted)
         await update_embed_message()
-        # Instead of editing to an empty message, supply a short non-empty text.
         await interaction.response.edit_message(content="You've been removed.", view=None)
 
 class SetTimeButton(discord.ui.Button):
@@ -236,6 +235,41 @@ class LastGameButton(discord.ui.Button):
             signups.append(promoted)
         await update_embed_message()
         await interaction.response.edit_message(content="You've been removed.", view=None)
+
+# -----------------------------------------------------------------------------
+# New: SelectGamesButton and GameSelectView
+# -----------------------------------------------------------------------------
+class SelectGamesButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Select Games", style=discord.ButtonStyle.primary, custom_id="select_games")
+    
+    async def callback(self, interaction: discord.Interaction):
+        view = GameSelectView(interaction.user)
+        await interaction.response.edit_message(content="Select your game:", view=view)
+
+class GameSelectView(discord.ui.View):
+    def __init__(self, user: discord.User):
+        super().__init__(timeout=60)
+        self.user = user
+
+    @discord.ui.select(
+        placeholder="Choose your game...",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(label="League", description="Play League of Legends", emoji="🏆"),
+            discord.SelectOption(label="CS2", description="Play Counter-Strike 2", emoji="🔫")
+        ]
+    )
+    async def select_callback(self, select: discord.ui.Select, interaction: discord.Interaction):
+        global game_choices
+        choice = select.values[0]
+        game_choices[interaction.user.id] = choice
+        await interaction.response.edit_message(content=f"Your game choice has been set to **{choice}**.", view=None)
+        # Optionally update the embed or state if desired.
+
+# Initialize the global game_choices dictionary
+game_choices = {}
 
 # -----------------------------------------------------------------------------
 # SetTimeView: Allows the user to adjust their ready time via increments.
@@ -389,7 +423,7 @@ async def check_ready_players():
     elif ready_count < 10:
         ready_notification_sent = False
 
-@tasks.loop(time=datetime.time(hour=12, minute=0))
+@tasks.loop(time=datetime.time(hour=9, minute=0))
 async def reset_signups():
     global signups, reserves, available_times
     signups.clear()
