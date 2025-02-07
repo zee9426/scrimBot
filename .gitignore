@@ -1,0 +1,8 @@
+# Ignore virtual environment directories
+venv/
+*.pyc
+__pycache__/
+
+# Optionally ignore your .env file if it contains sensitive credentials.
+.env
+state.json
