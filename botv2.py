@@ -146,7 +146,7 @@ def create_embed() -> discord.Embed:
         color=0x00ff00
     )
     # Add visuals (update these URLs as needed)
-    embed.set_image(url="https://raw.githubusercontent.com/your_username/your_repo/main/images/banner.png")
+    embed.set_image(url="https://github.com/zee9426/scrimBot/blob/main/GNNeZOf.png?raw=true")
     embed.set_thumbnail(url="https://raw.githubusercontent.com/your_username/your_repo/main/images/thumbnail.png")
     embed.set_author(name="Custom SignUp", icon_url="https://raw.githubusercontent.com/your_username/your_repo/main/images/icon.png")
     
