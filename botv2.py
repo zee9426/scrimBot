@@ -143,7 +143,7 @@ def create_embed() -> discord.Embed:
         color=0x00ff00
     )
     # Add a banner image and thumbnail (update URLs below)
-    embed.set_image(url="https://example.com/banner.png")
+    embed.set_image(url="c:\Users\bays\AppData\Local\Temp\hq720.jpg")
     embed.set_thumbnail(url="https://example.com/thumbnail.png")
     # Set author (optional)
     embed.set_author(name="Custom SignUp", icon_url="https://example.com/icon.png")
