@@ -35,7 +35,7 @@ game_choices = {}        # Mapping: user_id -> list of chosen game(s)
 
 STATE_FILE = "state.json"
 signup_message = None    # Global embed message in the signup channel
-ready_notification_sent = False  # To avoid duplicate notifications
+ready_notification_sent = False  # For duplicate notifications
 
 # -----------------------------------------------------------------------------
 # State persistence functions
@@ -122,7 +122,7 @@ def format_nz_time(dt: datetime.datetime) -> str:
     return dt.strftime("%H:%M ") + abbrev
 
 # -----------------------------------------------------------------------------
-# Embed creation and update functions (with vote counts, banner art, and lobby reset clock)
+# Embed creation and update functions (with vote counts and lobby reset clock)
 # -----------------------------------------------------------------------------
 def create_embed() -> discord.Embed:
     now_nzt = datetime.datetime.now(ZoneInfo("Pacific/Auckland"))
@@ -135,18 +135,20 @@ def create_embed() -> discord.Embed:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, _ = divmod(remainder, 60)
     time_until_reset_str = f"{hours:02d}:{minutes:02d}"
+
+    # Get today's date string
+    today_str = now_nzt.strftime("%A, %B %d, %Y")
     
     guild = bot.get_guild(GUILD_ID)
     embed = discord.Embed(
         title="Custom Game Sign‐Up",
-        description="Join the battle! Click **I'm in!** to sign up, set your ready time, and vote for your game.",
+        description=f"Today is {today_str} and 5pm onwards. Click **I'm in!** to sign up, set your ready time, and vote for your games.",
         color=0x00ff00
     )
-    # Add a banner image and thumbnail (update URLs below)
-    embed.set_image(url="https://github.com/zee9426/scrimBot/blob/main/GNNeZOf.png?raw=true")
-    embed.set_thumbnail(url="https://example.com/thumbnail.png")
-    # Set author (optional)
-    embed.set_author(name="Custom SignUp", icon_url="https://example.com/icon.png")
+    # Add visuals (update these URLs as needed)
+    embed.set_image(url="https://raw.githubusercontent.com/your_username/your_repo/main/images/banner.png")
+    embed.set_thumbnail(url="https://raw.githubusercontent.com/your_username/your_repo/main/images/thumbnail.png")
+    embed.set_author(name="Custom SignUp", icon_url="https://raw.githubusercontent.com/your_username/your_repo/main/images/icon.png")
     
     if signups:
         active_list = "\n".join(
@@ -216,7 +218,7 @@ class UserControlView(discord.ui.View):
     def __init__(self, user: discord.Member):
         super().__init__(timeout=0)
         self.user = user
-        # Show controls for signed-up users (Last Game button removed)
+        # Controls for signed-up users:
         self.add_item(ToggleOutButton())
         self.add_item(SetTimeButton())
         self.add_item(SelectGamesButton())
