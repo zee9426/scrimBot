@@ -31,7 +31,9 @@ bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 signups = []             # Active players (discord.Member objects)
 reserves = []            # Reserve players (discord.Member objects)
 available_times = {}     # Mapping: user_id -> ready datetime
-game_choices = {}        # Mapping: user_id -> list of chosen game(s)
+# New: Store each player's team and position selection.
+# Format: { user_id: { "team": 1 or 2, "position": "Top"/"JG"/"Mid"/"Bot"/"Support"/"Fill" } }
+player_roles = {}
 
 STATE_FILE = "state.json"
 signup_message = None    # Global embed message in the signup channel
@@ -47,14 +49,14 @@ def save_state():
         "signups": [member.id for member in signups],
         "reserves": [member.id for member in reserves],
         "available_times": {str(uid): dt.isoformat() for uid, dt in available_times.items()},
-        "game_choices": game_choices
+        "player_roles": player_roles
     }
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
     print("State saved.")
 
 async def load_state(guild: discord.Guild):
-    global signups, reserves, available_times, game_choices
+    global signups, reserves, available_times, player_roles
     if not os.path.exists(STATE_FILE):
         print("No saved state found.")
         return
@@ -72,7 +74,7 @@ async def load_state(guild: discord.Guild):
     available_times.clear()
     available_times.update(avail_times)
     
-    game_choices = state.get("game_choices", {})
+    player_roles = state.get("player_roles", {})
 
     new_signups = []
     for uid in signups_ids:
@@ -122,7 +124,41 @@ def format_nz_time(dt: datetime.datetime) -> str:
     return dt.strftime("%H:%M ") + abbrev
 
 # -----------------------------------------------------------------------------
-# Embed creation and update functions (with vote counts and lobby reset clock)
+# Team Composition Helpers
+# -----------------------------------------------------------------------------
+def get_team_composition(team_number: int) -> dict:
+    # Initialize roles for a team.
+    comp = {"Top": None, "JG": None, "Mid": None, "Bot": None, "Support": None, "Fill": []}
+    # Iterate over player_roles.
+    for uid, data in player_roles.items():
+        if data["team"] == team_number:
+            pos = data["position"]
+            if pos != "Fill":
+                # If the role is not already assigned, assign it.
+                if comp[pos] is None:
+                    comp[pos] = f"<@{uid}>"
+                else:
+                    # If already taken, add to fill list.
+                    comp["Fill"].append(f"<@{uid}>")
+            else:
+                comp["Fill"].append(f"<@{uid}>")
+    # Auto-assign fill players to open roles.
+    for role in ["Top", "JG", "Mid", "Bot", "Support"]:
+        if comp[role] is None and comp["Fill"]:
+            comp[role] = comp["Fill"].pop(0)
+    return comp
+
+def format_team(comp: dict) -> str:
+    lines = []
+    for role in ["Top", "JG", "Mid", "Bot", "Support"]:
+        if comp.get(role):
+            lines.append(f"**{role}:** {comp[role]}")
+        else:
+            lines.append(f"**{role}:** Open")
+    return "\n".join(lines)
+
+# -----------------------------------------------------------------------------
+# Embed creation and update functions (with team compositions and lobby reset clock)
 # -----------------------------------------------------------------------------
 def create_embed() -> discord.Embed:
     now_nzt = datetime.datetime.now(ZoneInfo("Pacific/Auckland"))
@@ -135,49 +171,26 @@ def create_embed() -> discord.Embed:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, _ = divmod(remainder, 60)
     time_until_reset_str = f"{hours:02d}:{minutes:02d}"
-
-    # Get today's date string
+    
     today_str = now_nzt.strftime("%A, %B %d, %Y")
     
     guild = bot.get_guild(GUILD_ID)
     embed = discord.Embed(
         title="Custom Game Sign‐Up",
-        description=f"Today is {today_str} and 5pm onwards. Click **I'm in!** to sign up, set your ready time, and vote for your games.",
+        description=f"Today is {today_str} and 5pm onwards. Click **I'm in!** to sign up and select your team & position.",
         color=0x00ff00
     )
-    # Add visuals (update these URLs as needed)
-    embed.set_image(url="https://github.com/zee9426/scrimBot/blob/main/GNNeZOf.png?raw=true")
+    # Add visual embellishments (update URLs as needed)
+    embed.set_image(url="https://raw.githubusercontent.com/your_username/your_repo/main/images/banner.png")
     embed.set_thumbnail(url="https://raw.githubusercontent.com/your_username/your_repo/main/images/thumbnail.png")
     embed.set_author(name="Custom SignUp", icon_url="https://raw.githubusercontent.com/your_username/your_repo/main/images/icon.png")
     
-    if signups:
-        active_list = "\n".join(
-            f"{i+1}. {member.mention}" +
-            (f" (Ready: {format_nz_time(available_times[member.id])})" if member.id in available_times else "")
-            for i, member in enumerate(signups)
-        )
-    else:
-        active_list = "None"
-    reserve_list = "\n".join(
-        f"{i+1}. {member.mention}" for i, member in enumerate(reserves)
-    ) if reserves else "None"
+    # Build team compositions from player_roles
+    team1 = get_team_composition(1)
+    team2 = get_team_composition(2)
     
-    # Tally game votes
-    league_votes = []
-    cs2_votes = []
-    if guild is not None:
-        for uid, choices in game_choices.items():
-            member = guild.get_member(int(uid))
-            if member:
-                if "League" in choices:
-                    league_votes.append(member.mention)
-                if "CS2" in choices:
-                    cs2_votes.append(member.mention)
-    
-    embed.add_field(name="Active Players", value=active_list, inline=False)
-    embed.add_field(name="Reserves", value=reserve_list, inline=False)
-    embed.add_field(name="League Votes", value=", ".join(league_votes) if league_votes else "None", inline=True)
-    embed.add_field(name="CS2 Votes", value=", ".join(cs2_votes) if cs2_votes else "None", inline=True)
+    embed.add_field(name="Team 1", value=format_team(team1), inline=True)
+    embed.add_field(name="Team 2", value=format_team(team2), inline=True)
     embed.set_footer(text=f"Max active players: {MAX_ACTIVE_PLAYERS}. Lobby resets in: {time_until_reset_str}")
     return embed
 
@@ -190,6 +203,13 @@ async def update_embed_message():
         except Exception as e:
             print("Error updating embed:", e)
     save_state()
+
+# -----------------------------------------------------------------------------
+# New: Update player's role selection
+# -----------------------------------------------------------------------------
+def update_role(user_id: int, team: int, position: str):
+    global player_roles
+    player_roles[user_id] = {"team": team, "position": position}
 
 # -----------------------------------------------------------------------------
 # Global Controls View: A single public "I'm in!" button.
@@ -218,10 +238,9 @@ class UserControlView(discord.ui.View):
     def __init__(self, user: discord.Member):
         super().__init__(timeout=0)
         self.user = user
-        # Controls for signed-up users:
         self.add_item(ToggleOutButton())
         self.add_item(SetTimeButton())
-        self.add_item(SelectGamesButton())
+        self.add_item(SelectRoleButton())
         if any(role.name == ADMIN_ROLE for role in user.roles):
             self.add_item(AdminControlsButton())
 
@@ -233,12 +252,12 @@ class ToggleOutButton(discord.ui.Button):
         super().__init__(label="I'm out!", style=discord.ButtonStyle.red, custom_id="user_toggle_out")
     
     async def callback(self, interaction: discord.Interaction):
-        global signups, reserves, available_times, game_choices
+        global signups, reserves, available_times, player_roles
         user = interaction.user
         if user in signups:
             signups.remove(user)
             available_times.pop(user.id, None)
-            game_choices.pop(user.id, None)  # Remove vote when leaving
+            player_roles.pop(user.id, None)  # Remove role selection when leaving
             if reserves:
                 promoted = reserves.pop(0)
                 signups.append(promoted)
@@ -253,39 +272,65 @@ class SetTimeButton(discord.ui.Button):
         view = SetTimeView(interaction.user)
         await interaction.response.edit_message(content="Adjust your ready time:", view=view)
 
-class SelectGamesButton(discord.ui.Button):
+class SelectRoleButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Select Games", style=discord.ButtonStyle.primary, custom_id="select_games")
+        super().__init__(label="Select Role", style=discord.ButtonStyle.primary, custom_id="select_role")
     
     async def callback(self, interaction: discord.Interaction):
-        view = GameSelectView(interaction.user)
-        await interaction.response.edit_message(content="Select your game(s):", view=view)
+        view = RoleSelectView(interaction.user)
+        await interaction.response.edit_message(content="Select your team and position:", view=view)
 
 # -----------------------------------------------------------------------------
-# GameSelectView: Allows selection of multiple games.
+# RoleSelectView: Presents two select menus for team and position.
 # -----------------------------------------------------------------------------
-class GameSelectView(discord.ui.View):
+class RoleSelectView(discord.ui.View):
     def __init__(self, user: discord.User):
         super().__init__(timeout=60)
         self.user = user
+        self.selected_team = None
+        self.selected_position = None
 
     @discord.ui.select(
-        placeholder="Choose your game(s)...",
+        placeholder="Select your team",
         min_values=1,
-        max_values=2,
+        max_values=1,
         options=[
-            discord.SelectOption(label="League", description="Play League of Legends", emoji="🏆"),
-            discord.SelectOption(label="CS2", description="Play Counter-Strike 2", emoji="🔫")
+            discord.SelectOption(label="Team 1", value="1"),
+            discord.SelectOption(label="Team 2", value="2")
         ]
     )
-    async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
-        global game_choices
-        game_choices[interaction.user.id] = select.values
-        await interaction.response.edit_message(content=f"Your game choices have been set to: **{', '.join(select.values)}**.", view=None)
-        await update_embed_message()
+    async def team_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.selected_team = int(select.values[0])
+        if self.selected_position is not None:
+            update_role(interaction.user.id, self.selected_team, self.selected_position)
+            await interaction.response.edit_message(content=f"Your role has been set to Team {self.selected_team} - {self.selected_position}.", view=None)
+            await update_embed_message()
+            self.stop()
+        else:
+            await interaction.response.defer()
 
-# Initialize global game_choices dictionary
-game_choices = {}
+    @discord.ui.select(
+        placeholder="Select your position",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(label="Top", value="Top"),
+            discord.SelectOption(label="JG", value="JG"),
+            discord.SelectOption(label="Mid", value="Mid"),
+            discord.SelectOption(label="Bot", value="Bot"),
+            discord.SelectOption(label="Support", value="Support"),
+            discord.SelectOption(label="Fill", value="Fill")
+        ]
+    )
+    async def position_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.selected_position = select.values[0]
+        if self.selected_team is not None:
+            update_role(interaction.user.id, self.selected_team, self.selected_position)
+            await interaction.response.edit_message(content=f"Your role has been set to Team {self.selected_team} - {self.selected_position}.", view=None)
+            await update_embed_message()
+            self.stop()
+        else:
+            await interaction.response.defer()
 
 # -----------------------------------------------------------------------------
 # SetTimeView: Allows the user to adjust their ready time via increments.
@@ -394,7 +439,7 @@ class RemovePlayerModal(discord.ui.Modal, title="Remove Player"):
     user_id_input = discord.ui.TextInput(label="User ID to remove", placeholder="Enter the user ID")
     
     async def callback(self, interaction: discord.Interaction):
-        global signups, reserves, available_times, game_choices
+        global signups, reserves, available_times, player_roles
         try:
             uid = int(self.user_id_input.value)
         except ValueError:
@@ -405,7 +450,7 @@ class RemovePlayerModal(discord.ui.Modal, title="Remove Player"):
         if any(member.id == uid for member in reserves):
             reserves[:] = [m for m in reserves if m.id != uid]
         available_times.pop(uid, None)
-        game_choices.pop(uid, None)
+        player_roles.pop(uid, None)
         await interaction.response.send_message("", view=None)
         await update_embed_message()
 
@@ -447,11 +492,11 @@ async def update_lobby_clock():
 
 @tasks.loop(time=datetime.time(hour=9, minute=0))
 async def reset_signups():
-    global signups, reserves, available_times, game_choices
+    global signups, reserves, available_times, player_roles
     signups.clear()
     reserves.clear()
     available_times.clear()
-    game_choices.clear()
+    player_roles.clear()
     channel = bot.get_channel(SIGNUP_CHANNEL_ID)
     if channel:
         await channel.send("Daily reset: Sign-ups are now open!")
