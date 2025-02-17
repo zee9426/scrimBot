@@ -4,7 +4,7 @@ import datetime
 import os
 import json
 from dotenv import load_dotenv
-from zoneinfo import ZoneInfo  # Python 3.9+; ensure tzdata is installed (pip install tzdata)
+from zoneinfo import ZoneInfo  # Python 3.9+; ensure tzdata is installed
 
 # -----------------------------------------------------------------------------
 # Load configuration from .env
@@ -28,20 +28,22 @@ bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 # -----------------------------------------------------------------------------
 # Global state
 # -----------------------------------------------------------------------------
-signups = []             # List of discord.Member objects (active players)
-reserves = []            # List of discord.Member objects (reserve players)
-available_times = {}     # Mapping: user_id (int) -> ready datetime (datetime object)
-game_choices = {}        # Mapping: user_id (int) -> chosen game (string)
+signups = []             # Active players (discord.Member objects)
+reserves = []            # Reserve players (discord.Member objects)
+available_times = {}     # Mapping: user_id -> ready datetime
+game_choices = {}        # Mapping: user_id -> list of chosen game(s)
 
 STATE_FILE = "state.json"
 signup_message = None    # Global embed message in the signup channel
-ready_notification_sent = False  # For duplicate notification control
+ready_notification_sent = False  # To avoid duplicate notifications
 
 # -----------------------------------------------------------------------------
 # State persistence functions
 # -----------------------------------------------------------------------------
 def save_state():
+    global signup_message
     state = {
+        "signup_message_id": signup_message.id if signup_message else None,
         "signups": [member.id for member in signups],
         "reserves": [member.id for member in reserves],
         "available_times": {str(uid): dt.isoformat() for uid, dt in available_times.items()},
@@ -103,7 +105,7 @@ async def load_state(guild: discord.Guild):
     print("State loaded.")
 
 # -----------------------------------------------------------------------------
-# Helper: Format New Zealand time (without extra color)
+# Helper: Format New Zealand time (returns HH:MM with NZDT/NZST)
 # -----------------------------------------------------------------------------
 def format_nz_time(dt: datetime.datetime) -> str:
     offset = dt.utcoffset()
@@ -120,20 +122,36 @@ def format_nz_time(dt: datetime.datetime) -> str:
     return dt.strftime("%H:%M ") + abbrev
 
 # -----------------------------------------------------------------------------
-# Embed creation and update functions
+# Embed creation and update functions (with vote counts, banner art, and lobby reset clock)
 # -----------------------------------------------------------------------------
 def create_embed() -> discord.Embed:
     now_nzt = datetime.datetime.now(ZoneInfo("Pacific/Auckland"))
+    # Calculate lobby reset time (reset at 9:00 AM NZT)
+    reset_time = now_nzt.replace(hour=9, minute=0, second=0, microsecond=0)
+    if now_nzt >= reset_time:
+        reset_time += datetime.timedelta(days=1)
+    remaining = reset_time - now_nzt
+    total_seconds = int(remaining.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+    time_until_reset_str = f"{hours:02d}:{minutes:02d}"
+    
+    guild = bot.get_guild(GUILD_ID)
     embed = discord.Embed(
         title="Custom Game Sign‐Up",
-        description="Click **I'm in!** to sign up, manage your ready time, and select a game.",
+        description="Join the battle! Click **I'm in!** to sign up, set your ready time, and vote for your game.",
         color=0x00ff00
     )
+    # Add a banner image and thumbnail (update URLs below)
+    embed.set_image(url="https://example.com/banner.png")
+    embed.set_thumbnail(url="https://example.com/thumbnail.png")
+    # Set author (optional)
+    embed.set_author(name="Custom SignUp", icon_url="https://example.com/icon.png")
+    
     if signups:
         active_list = "\n".join(
             f"{i+1}. {member.mention}" +
-            (f" (Ready: {format_nz_time(available_times[member.id])})"
-             if member.id in available_times else "")
+            (f" (Ready: {format_nz_time(available_times[member.id])})" if member.id in available_times else "")
             for i, member in enumerate(signups)
         )
     else:
@@ -142,9 +160,23 @@ def create_embed() -> discord.Embed:
         f"{i+1}. {member.mention}" for i, member in enumerate(reserves)
     ) if reserves else "None"
     
+    # Tally game votes
+    league_votes = []
+    cs2_votes = []
+    if guild is not None:
+        for uid, choices in game_choices.items():
+            member = guild.get_member(int(uid))
+            if member:
+                if "League" in choices:
+                    league_votes.append(member.mention)
+                if "CS2" in choices:
+                    cs2_votes.append(member.mention)
+    
     embed.add_field(name="Active Players", value=active_list, inline=False)
     embed.add_field(name="Reserves", value=reserve_list, inline=False)
-    embed.set_footer(text=f"Max active players: {MAX_ACTIVE_PLAYERS}. Reserve players are promoted as spots open up.")
+    embed.add_field(name="League Votes", value=", ".join(league_votes) if league_votes else "None", inline=True)
+    embed.add_field(name="CS2 Votes", value=", ".join(cs2_votes) if cs2_votes else "None", inline=True)
+    embed.set_footer(text=f"Max active players: {MAX_ACTIVE_PLAYERS}. Lobby resets in: {time_until_reset_str}")
     return embed
 
 async def update_embed_message():
@@ -174,7 +206,6 @@ class GlobalControlsView(discord.ui.View):
             else:
                 reserves.append(user)
             await update_embed_message()
-        # Send an ephemeral control view for the user.
         view = UserControlView(user)
         await interaction.response.send_message("", view=view, ephemeral=True)
 
@@ -185,10 +216,9 @@ class UserControlView(discord.ui.View):
     def __init__(self, user: discord.Member):
         super().__init__(timeout=0)
         self.user = user
-        # Show controls for a signed-up user:
+        # Show controls for signed-up users (Last Game button removed)
         self.add_item(ToggleOutButton())
         self.add_item(SetTimeButton())
-        self.add_item(LastGameButton())
         self.add_item(SelectGamesButton())
         if any(role.name == ADMIN_ROLE for role in user.roles):
             self.add_item(AdminControlsButton())
@@ -201,16 +231,16 @@ class ToggleOutButton(discord.ui.Button):
         super().__init__(label="I'm out!", style=discord.ButtonStyle.red, custom_id="user_toggle_out")
     
     async def callback(self, interaction: discord.Interaction):
-        global signups, reserves, available_times
+        global signups, reserves, available_times, game_choices
         user = interaction.user
         if user in signups:
             signups.remove(user)
             available_times.pop(user.id, None)
+            game_choices.pop(user.id, None)  # Remove vote when leaving
             if reserves:
                 promoted = reserves.pop(0)
                 signups.append(promoted)
         await update_embed_message()
-        # Update ephemeral message to confirm removal.
         await interaction.response.edit_message(content="You've been removed.", view=None)
 
 class SetTimeButton(discord.ui.Button):
@@ -221,54 +251,36 @@ class SetTimeButton(discord.ui.Button):
         view = SetTimeView(interaction.user)
         await interaction.response.edit_message(content="Adjust your ready time:", view=view)
 
-class LastGameButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Last Game", style=discord.ButtonStyle.blurple, custom_id="user_last_game")
-    
-    async def callback(self, interaction: discord.Interaction):
-        global signups, reserves, available_times
-        user = interaction.user
-        if user not in signups:
-            await interaction.response.edit_message(content="You are not an active player.", view=None)
-            return
-        signups.remove(user)
-        available_times.pop(user.id, None)
-        if reserves:
-            promoted = reserves.pop(0)
-            signups.append(promoted)
-        await update_embed_message()
-        await interaction.response.edit_message(content="You've been removed.", view=None)
-
-# -----------------------------------------------------------------------------
-# New: SelectGamesButton and GameSelectView for game selection.
-# -----------------------------------------------------------------------------
 class SelectGamesButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="Select Games", style=discord.ButtonStyle.primary, custom_id="select_games")
     
     async def callback(self, interaction: discord.Interaction):
         view = GameSelectView(interaction.user)
-        await interaction.response.edit_message(content="Select your game:", view=view)
+        await interaction.response.edit_message(content="Select your game(s):", view=view)
 
+# -----------------------------------------------------------------------------
+# GameSelectView: Allows selection of multiple games.
+# -----------------------------------------------------------------------------
 class GameSelectView(discord.ui.View):
     def __init__(self, user: discord.User):
         super().__init__(timeout=60)
         self.user = user
 
     @discord.ui.select(
-        placeholder="Choose your game...",
+        placeholder="Choose your game(s)...",
         min_values=1,
-        max_values=1,
+        max_values=2,
         options=[
             discord.SelectOption(label="League", description="Play League of Legends", emoji="🏆"),
             discord.SelectOption(label="CS2", description="Play Counter-Strike 2", emoji="🔫")
         ]
     )
-    async def select_callback(self, select: discord.ui.Select, interaction: discord.Interaction):
+    async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
         global game_choices
-        choice = select.values[0]
-        game_choices[interaction.user.id] = choice
-        await interaction.response.edit_message(content=f"Your game choice has been set to **{choice}**.", view=None)
+        game_choices[interaction.user.id] = select.values
+        await interaction.response.edit_message(content=f"Your game choices have been set to: **{', '.join(select.values)}**.", view=None)
+        await update_embed_message()
 
 # Initialize global game_choices dictionary
 game_choices = {}
@@ -380,7 +392,7 @@ class RemovePlayerModal(discord.ui.Modal, title="Remove Player"):
     user_id_input = discord.ui.TextInput(label="User ID to remove", placeholder="Enter the user ID")
     
     async def callback(self, interaction: discord.Interaction):
-        global signups, reserves, available_times
+        global signups, reserves, available_times, game_choices
         try:
             uid = int(self.user_id_input.value)
         except ValueError:
@@ -391,6 +403,7 @@ class RemovePlayerModal(discord.ui.Modal, title="Remove Player"):
         if any(member.id == uid for member in reserves):
             reserves[:] = [m for m in reserves if m.id != uid]
         available_times.pop(uid, None)
+        game_choices.pop(uid, None)
         await interaction.response.send_message("", view=None)
         await update_embed_message()
 
@@ -425,12 +438,18 @@ async def check_ready_players():
     elif ready_count < 10:
         ready_notification_sent = False
 
+@tasks.loop(minutes=1)
+async def update_lobby_clock():
+    # Refresh the global embed every minute so the lobby reset clock updates.
+    await update_embed_message()
+
 @tasks.loop(time=datetime.time(hour=9, minute=0))
 async def reset_signups():
-    global signups, reserves, available_times
+    global signups, reserves, available_times, game_choices
     signups.clear()
     reserves.clear()
     available_times.clear()
+    game_choices.clear()
     channel = bot.get_channel(SIGNUP_CHANNEL_ID)
     if channel:
         await channel.send("Daily reset: Sign-ups are now open!")
@@ -438,7 +457,7 @@ async def reset_signups():
     save_state()
 
 # -----------------------------------------------------------------------------
-# Bot Startup: Send the global signup message and load persisted state.
+# Bot Startup: Send (or update) the global signup message and load persisted state.
 # -----------------------------------------------------------------------------
 @bot.event
 async def on_ready():
@@ -457,11 +476,24 @@ async def on_ready():
             print("Error fetching channel:", e)
             return
     print(f"Found signup channel: {channel.name} (ID: {channel.id})")
-    embed = create_embed()
-    signup_message = await channel.send(embed=embed, view=view)
+    stored_msg_id = None
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f:
+            state = json.load(f)
+        stored_msg_id = state.get("signup_message_id")
+    if stored_msg_id:
+        try:
+            signup_message = await channel.fetch_message(stored_msg_id)
+            print("Fetched existing signup message.")
+        except Exception as e:
+            print("Could not fetch stored signup message, sending new one:", e)
+            signup_message = await channel.send(embed=create_embed(), view=view)
+    else:
+        signup_message = await channel.send(embed=create_embed(), view=view)
     await load_state(channel.guild)
     await update_embed_message()
     reset_signups.start()
     check_ready_players.start()
+    update_lobby_clock.start()
 
 bot.run(TOKEN)
